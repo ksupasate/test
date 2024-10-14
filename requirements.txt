@@ -1,6 +1,6 @@
 streamlit
 numpy
-pyaudio
+PyAudio
 websockets
 python-dotenv
 tzlocal
