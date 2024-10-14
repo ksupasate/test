@@ -1,0 +1,6 @@
+streamlit
+numpy
+pyaudio
+websockets
+python-dotenv
+tzlocal
