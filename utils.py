@@ -6,7 +6,7 @@ import queue
 from datetime import datetime
 
 import numpy as np
-import sounddevice as sd
+import pyaudio  # Updated import
 import tzlocal
 import websockets
 from dotenv import load_dotenv
@@ -125,42 +125,57 @@ class SimpleRealtime:
 
 class StreamingAudioRecorder:
     """
-    Thanks Sonnet 3.5...
+    Audio recorder using PyAudio.
     """
 
-    def __init__(self, sample_rate=24_000, channels=1):
+    def __init__(self, sample_rate=24000, channels=1, frames_per_buffer=2000):
         self.sample_rate = sample_rate
         self.channels = channels
+        self.frames_per_buffer = frames_per_buffer
         self.audio_queue = queue.Queue()
         self.is_recording = False
-        self.audio_thread = None
+        self.p = pyaudio.PyAudio()
+        self.stream = None
 
-    def callback(self, indata, frames, time, status):
+    def callback(self, in_data, frame_count, time_info, status):
         """
         This will be called for each audio block
         that gets recorded.
         """
-        self.audio_queue.put(indata.copy())
+        pcm_audio_chunk = np.frombuffer(in_data, dtype=np.int16)
+        self.audio_queue.put(pcm_audio_chunk)
+        return (None, pyaudio.paContinue)
 
     def start_recording(self):
-        self.is_recording = True
-        self.audio_thread = sd.InputStream(
-            dtype="int16",
-            samplerate=self.sample_rate,
+        if self.is_recording:
+            return  # Already recording
+
+        self.stream = self.p.open(
+            format=pyaudio.paInt16,
             channels=self.channels,
-            callback=self.callback,
-            blocksize=2_000,
+            rate=self.sample_rate,
+            input=True,
+            frames_per_buffer=self.frames_per_buffer,
+            stream_callback=self.callback,
         )
-        self.audio_thread.start()
+        self.stream.start_stream()
+        self.is_recording = True
 
     def stop_recording(self):
-        if self.is_recording:
+        if self.is_recording and self.stream is not None:
+            self.stream.stop_stream()
+            self.stream.close()
+            self.stream = None
             self.is_recording = False
-            self.audio_thread.stop()
-            self.audio_thread.close()
 
     def get_audio_chunk(self):
         try:
             return self.audio_queue.get_nowait()
         except queue.Empty:
             return None
+
+    def __del__(self):
+        if self.stream is not None:
+            self.stream.stop_stream()
+            self.stream.close()
+        self.p.terminate()

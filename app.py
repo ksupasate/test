@@ -2,11 +2,13 @@ import asyncio
 import base64
 import json
 import threading
+import time  # Added for sleep in audio stream
 from asyncio import run_coroutine_threadsafe
 
 import numpy as np
-import sounddevice as sd
+import pyaudio  # Updated import
 import streamlit as st
+
 from constants import HIDE_STREAMLIT_RUNNING_MAN_SCRIPT
 from utils import SimpleRealtime, StreamingAudioRecorder
 
@@ -46,27 +48,53 @@ def audio_buffer_cb(pcm_audio_chunk):
         audio_buffer = np.concatenate([audio_buffer, pcm_audio_chunk])
 
 
-# Callback function for real-time playback using sounddevice
-def sd_audio_cb(outdata, frames, time, status):
+# Callback function for real-time playback using PyAudio
+def sd_audio_cb(in_data, frame_count, time_info, status):
     global audio_buffer
     channels = 1
     with buffer_lock:
-        if len(audio_buffer) >= frames:
-            outdata[:] = audio_buffer[:frames].reshape(-1, channels)
-            audio_buffer = audio_buffer[frames:]
+        if len(audio_buffer) >= frame_count:
+            data = audio_buffer[:frame_count].reshape(-1, channels).tobytes()
+            audio_buffer = audio_buffer[frame_count:]
         else:
-            outdata.fill(0)
+            data = (np.zeros(frame_count * channels, dtype=np.int16)).tobytes()
+    return (data, pyaudio.paContinue)
 
 
 def start_audio_stream():
-    with sd.OutputStream(
-        callback=sd_audio_cb,
-        dtype="int16",
-        samplerate=24_000,
+    p = pyaudio.PyAudio()
+
+    def py_audio_callback(in_data, frame_count, time_info, status):
+        global audio_buffer
+        channels = 1
+        with buffer_lock:
+            if len(audio_buffer) >= frame_count:
+                data = audio_buffer[:frame_count].reshape(-1, channels).tobytes()
+                audio_buffer = audio_buffer[frame_count:]
+            else:
+                data = (np.zeros(frame_count * channels, dtype=np.int16)).tobytes()
+        return (data, pyaudio.paContinue)
+
+    stream = p.open(
+        format=pyaudio.paInt16,
         channels=1,
-        blocksize=2_000,
-    ):
-        sd.sleep(int(10e6))
+        rate=24000,
+        output=True,
+        stream_callback=py_audio_callback,
+        frames_per_buffer=2000,
+    )
+
+    stream.start_stream()
+
+    try:
+        while stream.is_active():
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
 
 
 @st.cache_resource(show_spinner=False)
@@ -156,17 +184,20 @@ def stop_recording():
 def audio_player():
     if not st.session_state.audio_stream_started:
         st.session_state.audio_stream_started = True
-        start_audio_stream()
+        # Start the audio stream in a separate thread to prevent blocking
+        threading.Thread(target=start_audio_stream, daemon=True).start()
 
 
 @st.fragment(run_every=1)
 def audio_recorder():
     if st.session_state.recording:
         while not st.session_state.recorder.audio_queue.empty():
-            chunk = st.session_state.recorder.audio_queue.get()
-            st.session_state.client.send(
-                "input_audio_buffer.append", {"audio": base64.b64encode(chunk).decode()}
-            )
+            chunk = st.session_state.recorder.get_audio_chunk()
+            if chunk is not None:
+                st.session_state.client.send(
+                    "input_audio_buffer.append",
+                    {"audio": base64.b64encode(chunk).decode()},
+                )
 
 
 @st.fragment(run_every=1)
